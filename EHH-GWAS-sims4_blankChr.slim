@@ -1,0 +1,466 @@
+	//////////////        DESCRIPTION          ////////////////////////////////////////////////////////
+	// Simulation for a single population considering 10 chromosomes 
+	// having 10Mb each and containing 66 loci with 1500bp
+	// functional regions are NSyn
+	// 
+	// Genotypes and selective effect: (do at the initialization)
+	// (neutral,) positive and negative selective effects
+	// negative will follow a gamma: two parameters
+	// positive will follow an exponential: one parameter
+	// a proportion of each class of variants is included. 
+	//
+	// The fitness per individual: (for each generation and individual)
+	// the fitness is estimated multiplying the fitness (1+s)(1+s)... of each variant within gene,
+	// The fitness will determine the probability to contribute to the next generation, by genotype.
+	//
+	// Phenotypic effect: (the last generation?)
+	// This is calculated by the Eyre-Walker equation (2010) given their s, ...
+	// ...the provided "correlation" genotype-phenotype and a random deviation epsilon (environmental) from a N(0,sd_eps). 
+	// Summing up all the phenotypic values of all genes will determine the total trait.
+	// Many different traits may be considered in each simulation, just modifying the correlation and the epsilon.
+	// For each trait, the fitness s value will be the same but will affect each trait differentially.
+	//
+	// In case using the same fitness as a trait (delta=1,sigma=0,tau=1.0), it is a straight line. 
+	// The same would be for a bivariant gamma distrib. (trait,s).
+	//
+	// To Keep: (last generation)
+	// Keep sequences (positions, frequencies and individual).
+	// Keep the selective effects per position, dominance, effect size (to determine the major effect positions)
+	///////////////////////////////////////////////////////////////////////////////////////////////////
+	
+	//Command-line options for running this slim script are:
+	// for example:
+	/*
+	
+	slim -t -m -d "seed=12345" -d "nloci=100" -d "nchrom=10" -d "size_chrom=100000" -d "size_gene=1500" -d "Ne_pop=1000" -d "t0=asInteger(10*Ne_pop)" -d "tend=asInteger(1*Ne_pop)"-d "maprec='convex'" -d "mutation_rate=2.5e-8" -d "max_recrate=2.5e-5" -d "min_recrate=2.5e-7" -d "s_mean_beneficial_p1=0.0125" -d "s_mean_beneficial_p2=0.00125" -d "s_mean_deleterious=-0.03" -d "shape_deleterious=0.2" -d "shape_beneficial=1" -d "prop_beneficial_p1=0.01" -d "prop_beneficial_p2=0.10" -d "tau=0.8" -d "sigma=0.1" -d "disp=0.10" -d "h_mean=0.36" -d "refn=1" -d "file_input1='EW_function_neg_plus_posB.R'" -d "file_output1='slim.p1.output_file.txt'" ./EHH-GWAS-sims4.slim &
+		
+	*/
+
+initialize() {
+	//add parameter definitions:
+	if (exists("slimgui") | (!exists("seed"))) {
+		defineConstant("filePathData","/Users/sramos/Desktop/GWAS-EHHS/Slim_sim/");
+		defineConstant("seed", 12345);
+		
+		//general definitions
+		defineConstant("nloci",1e3); //1e3 //1e4 //660
+		defineConstant("size_gene",1500);
+		defineConstant("size_chrom",1e7); // 1e6 //1e7
+		defineConstant("Ne_pop",500);
+		defineConstant("nchrom",1); //number of chromosomes
+		defineConstant("maprec","flat");//","convex"); //map of recombination: [convex, quadratic, conic, flat] (centromere to telomeres)
+		defineConstant("nblank_chr",0); //number of chromosomes without genes (evenly distributed)
+		
+		//quadratic is a curve awith lower value at centromere, 
+		//conic is a straight line to centromere, 
+		//convex is inverse than quadratic, perhaps compensating gene density..
+		defineConstant("mutation_rate",1.25e-7); //mutation rate
+		defineConstant("max_recrate",1.25e-7); //max rec rate. 1 gene/0.15Mb, that is 1.5e5 * 2.5e-7 between genes (0.375)
+		defineConstant("min_recrate",1.25e-7); //min rec rate. 2 orders of magnitude lower close to centromere (0.00375)
+		
+		//input functional mutations
+		defineConstant("file_input1","EW_function_neg_plus_posB.R");
+		//output
+		defineConstant("file_output1","slim.output_s1_it0");//,"muts_EW_tau10s100"); // output file
+		
+		//times to change environment and time to present
+		defineConstant("t0",asInteger(1 * Ne_pop)); //10*Ne_pop
+		defineConstant("tend",asInteger(0.10 * Ne_pop));
+		
+		//initial distributions of fitness
+		defineConstant("h_mean",0.36); //fom Wang, Caballero, Keigthley and Hill (0.36). mean dominance
+		defineConstant("s_mean_deleterious",-0.03);
+		defineConstant("shape_deleterious",0.2);
+		defineConstant("shape_beneficial",1);
+		defineConstant("s_mean_beneficial_p1",0.01250);
+		defineConstant("s_mean_beneficial_p2",0.00125);
+		defineConstant("prop_beneficial_p1",0.001);
+		defineConstant("prop_beneficial_p2",0.010);
+			
+		//Phenotypic and environmental parameters
+		defineConstant("tau",0.1); //a kind of correlation phenotype-fitness (for EWfunction)
+		defineConstant("sigma",0.5); //a kind of environmental variance for phenotype
+		defineConstant("disp",0.2); //displacement of the better phenotype value after environmental change
+
+		//force sweeps
+		defineConstant("nsweeps",5);
+		defineConstant("s_beneficial_sweep",0.10); //Warning: strong beneficial effect !
+
+		defineConstant("refn",1); //reference number (eg. scenario)
+
+		//POSSIBLE COMBINATIONS OF PARAMETERS: 5 diff scenarios:
+		//tau_values   = c(0.00,0.10,0.25,0.50,0.80)
+		//sigma_values = c(0.60,0.50,0.40,0.30,0.10)
+		//disp_values  = c(0.00,0.25,0.10,0.05,0.02)
+
+		//Scenario	 	%(+).p1 		%(+).p2  	4Nes(+) 	4Nes(-) 	shape(-) 
+		//1..9 	 		1e-2			1e-2/1e-1	5/50		-120		0.2	
+	} 
+	else {
+		defineConstant("filePathData","");
+	}
+
+	//This command only works when slim is run on a shell: In case using GUI, the files for SelCoeff and PhenEffs, etc... should be provided first.
+	//RUN: R --vanilla --args totalm2_muts_p1 totalm2_muts_p2 prop.pos_p1 prop.pos_p2 Ne shapeSn meanSn shapeSp1 shapeSp2 h_mean disp tau sigma output_file < ./EW_function_neg_plus_posB.R
+	//RUN; #R --vanilla --args 500000 50000 0.01 0.1 1000 0.2 -4000 1 50 50 0.36 0.1 0.80 0.10 muts_EW_tau0.8 1 < ./EW_function_neg_plus_posB.R
+
+	totalm2_muts_p1 = asInteger(nloci * size_gene * 2/3 * 2 * Ne_pop * mutation_rate * t0);
+	if(totalm2_muts_p1 > 1e7) totalm2_muts_p1 = 1e7;
+	totalm2_muts_p2 = asInteger(nloci * size_gene * 2/3 * 2 * Ne_pop * mutation_rate * tend);
+	if(totalm2_muts_p2 > 1e7) totalm2_muts_p2 = 1e7;
+	
+	print ("R --vanilla --args " + totalm2_muts_p1 + " " + totalm2_muts_p2 + " " + prop_beneficial_p1 + " " + prop_beneficial_p2 + " " + Ne_pop + " " + shape_deleterious + " " +  s_mean_deleterious + " " +  shape_beneficial + " " + s_mean_beneficial_p1 + " " + s_mean_beneficial_p2 + " " + h_mean + " " + disp + " " + tau + " " + sigma + " " + filePathData + file_output1 + "_mutations" + " " + refn + " " + "< " + file_input1);
+	system("R --vanilla --args " + totalm2_muts_p1 + " " + totalm2_muts_p2 + " " + prop_beneficial_p1 + " " + prop_beneficial_p2 + " " + Ne_pop + " " + shape_deleterious + " " +  s_mean_deleterious + " " +  shape_beneficial + " " + s_mean_beneficial_p1 + " " + s_mean_beneficial_p2 + " " + h_mean + " " + disp + " " + tau + " " + sigma + " " + filePathData + file_output1 + "_mutations" + " " + refn + " " + "< " + file_input1);
+	
+	//read mutations (s and a)
+	Sel_values = readFile(filePathData + file_output1 + "_mutations_SelCoeffs.txt"); 
+	Sel_values2 = readFile(filePathData + file_output1 + "_mutations_SelCoeffs2.txt"); 
+	Phe_values = readFile(filePathData + file_output1 + "_mutations_PhenEffs.txt"); 
+	Dom_values = readFile(filePathData + file_output1 + "_mutations_dominance.txt"); 
+	Sel_values_p2 = readFile(filePathData + file_output1 + "_mutations_SelCoeffs.p2.txt"); 
+	Phe_values_p2 = readFile(filePathData + file_output1 + "_mutations_PhenEffs.p2.txt"); 
+	Dom_values_p2 = readFile(filePathData + file_output1 + "_mutations_dominance.p2.txt"); 
+	//include values in constant vectors
+	defineConstant("sel_values",asFloat(Sel_values));
+	defineConstant("sel_values2",asFloat(Sel_values2));
+	defineConstant("phe_values",asFloat(Phe_values));
+	defineConstant("dom_values",asFloat(Dom_values));
+	defineConstant("sel_values_p2",asFloat(Sel_values_p2));
+	defineConstant("phe_values_p2",asFloat(Phe_values_p2));
+	defineConstant("dom_values_p2",asFloat(Dom_values_p2));
+	
+	totalm2_muts_p1 = size(Phe_values);
+	totalm2_muts_p2 = size(Phe_values_p2);
+	defineConstant("total_m2muts_p1",totalm2_muts_p1); //generate an average number of mutation. Then sample with replacement.
+	defineConstant("total_m2muts_p2",totalm2_muts_p2); //generate an average number of mutation. Then sample with replacement.
+	
+	//define simulation:
+ 	defineConstant("h",0.5);//it is changed later for all functional
+
+	setSeed(seed);
+	initializeMutationRate(mutation_rate); // not for nucleotide-based models
+
+	//Initialize the type of mutations and the fitness of them 
+	//1.mutation type: neutral
+	initializeMutationType("m1", h, "f", 0.0); //selection coefficient s=0
+	//2. mutation type: functional (positive, neutral, negative)
+	initializeMutationType("m2", h, "f", 0.0); //modified posteriorly using a bivariant distribution (h and s)
+	
+	//maintain the fixed substitutions to estimate the fitness and to keep all these mutations	
+	//m1.convertToSubstitution = F;
+	//m1.color = "white";
+	m2.convertToSubstitution = F;
+	//m2.color = "purple";
+	
+	//Initialize the type of genomic element that we want and the proportions
+	//synonymous sites
+	initializeGenomicElementType("g1", m1, 1.0); //non-coding regions
+	//non-synonymous sites	
+	initializeGenomicElementType("g2", m2, 1.0);
+		
+	//nloci genes of size_gene base pairs each one separated by an interval region. 
+	//Also each gene is simulated as a part of exons (g2) and a non-coding regions (g1). 
+	//Initialiazation of genomic elements (codon=2nonsyn+1syn)
+	interval_gene = integerDiv(size_chrom-integerDiv(nloci,nchrom-nblank_chr)*size_gene,integerDiv(nloci,nchrom-nblank_chr));
+	interval_blank_chr = integerDiv(nchrom,nblank_chr+1) * size_chrom;
+		
+	if(interval_gene < 1) {
+		print("Error: size_chrom is smaller than nloci*size_gene!!!");
+	}
+	index1=interval_gene;
+	index2=index1+size_gene-1;
+	index3=index2; index4=0;
+	initializeGenomicElement(g1, 0, index1-1);
+	for (k in 1:nloci) {
+		count = 0;
+		for (i in index1:index2) {
+			count2 = count;
+			count = count2 + 1;
+			if (count == 1) {
+				initializeGenomicElement(g2, i, i); //non-synonymous
+			} else if (count == 2) {
+				initializeGenomicElement(g2, i, i); //non-synonymous
+			} else if (count == 3) {
+				initializeGenomicElement(g1, i, i); //synonymous
+				count=0;
+			}
+		}
+		index3=index3+1+interval_gene+size_gene-1;
+		if (index3>=interval_blank_chr & index3<size_chrom*nchrom) {
+			index4=index4+1;
+			initializeGenomicElement(g1, (index4*(size_chrom)+(index4-1)*(interval_blank_chr)), (index4*(interval_blank_chr+size_chrom)-1)); //non-coding
+			//print("nc: " + (index4*(size_chrom)+(index4-1)*(interval_blank_chr)) + " " + (index4*(interval_blank_chr+size_chrom)-1));
+			index1=index4*(interval_blank_chr+size_chrom)+interval_gene;
+			index2=index1+size_gene-1;
+			if(index2 < nchrom*size_chrom) {
+				initializeGenomicElement(g1, (index1-interval_gene), (index1-1)); //non-coding
+				//print("nc: " + (index1-interval_gene) + " " + (index1-1));
+				index3=interval_gene+size_gene-1;;
+			}
+		} 
+		else {
+			 if(index3<=size_chrom*nchrom) {
+				initializeGenomicElement(g1, (index2+1), (index2+interval_gene)); //non-coding
+				//print("nc: " + (index2+1) + " " + (index2+interval_gene));
+				index1=index2+1+interval_gene;
+				index2=index1+size_gene-1;
+			}
+		}
+	}
+	
+	// Divide  each chromosome in nseg_chrom recombinant sections
+	nseg_chrom = 10;
+	size_seg = integerDiv(size_chrom,nseg_chrom);
+	
+	// The recombination rates between the base pairs of different chromosomes is 0.5.	
+	// positions to include rec=0.5 at the end of the chromosome
+	ends=NULL;
+	ind1=size_seg-1;
+	for(chrn in c(1:nchrom)) {
+		for(nseg in 1:nseg_chrom) {
+			ends=c(ends,ind1);
+			ind1=ind1+size_seg;
+		}
+		ind2=ind1-size_seg+1;
+		if(chrn!=nchrom)
+			ends=c(ends,ind2);
+	}
+	ends=c(ends,ind2);
+
+	//make nseg_chrom sections per chromosome and calculate different recombination rates
+	//recombination rates
+	recmax = max_recrate; //1 gene/0.3Mb, that is 3e5 * 2.5e-7 between genes
+	recmin = min_recrate; // 2 orders of magnitude lower close to centromere
+	rates=NULL;
+	centromere = size_chrom / 2;
+	for(chrn in c(1:nchrom)) {
+		sumpos = size_seg/2;
+		for(nseg in 1:nseg_chrom) {
+			if(maprec == "flat") 
+				ind1 = (recmax+recmin)/2.0;
+			if(maprec == "quadratic") //quadratic curve, minimum at centromere
+				ind1 = (recmax-recmin) * ((sumpos-centromere)/centromere)^2 + recmin;
+			if(maprec == "conic") //lineal from telomeres to centromere, minimum at centromere
+				ind1 = abs((recmax-recmin) * ((sumpos-centromere)/centromere)^1) + recmin;
+			if(maprec == "convex")
+				ind1 = ((recmax-recmin)-((recmax-recmin) * ((abs(sumpos-centromere)-centromere)/centromere)^2)) + recmin;
+			rates=c(rates, ind1);
+			// convex: inverse to quadratic, drop strongly to the minimum at centromere, 
+			//         in order to compensate low density of genes at centromere
+			if(!(chrn==nchrom & nseg==nseg_chrom))  {
+				if(chrn!=nchrom & nseg==nseg_chrom)
+					rates=c(rates, 0.5);
+			}
+			sumpos = sumpos + size_seg;
+		}
+	}
+	rates=c(rates,0);
+	initializeRecombinationRate(rates=rates,ends=ends);	
+	//initializeRecombinationRate(max_recrate); 
+	
+	print("number of generations until sampling p1: " + t0);
+	print("number of generations until sampling p2: " + tend);
+	print("maximum number of mutations generated for p1 (using R script): " + (total_m2muts_p1));
+	print(("maximum number of mutations generated for p2 (assumed short time until sampling): " + total_m2muts_p2));
+}
+
+function (void)output_fit_plus_phen(string filePath, logical append, logical printpar, string pop)
+{
+ 	print("keeping results for " +  pop);	
+	writeFile(filePath=filePath,contents=("\n"),append=append);
+	if(printpar == T) {
+		writeFile(filePath=filePath,contents=("#seed: "+ seed),append=T);
+		
+		//general definitions 27 rows for comments (including blanl rows)
+		writeFile(filePath=filePath,contents=("#nloci: "+ nloci),append=T); //nloci=66
+		writeFile(filePath=filePath,contents=("#size_gene: " + size_gene),append=T);
+		writeFile(filePath=filePath,contents=("#size_chrom: " + size_chrom),append=T);//1e7
+		writeFile(filePath=filePath,contents=("#Ne_pop: " + Ne_pop),append=T);
+		writeFile(filePath=filePath,contents=("#nchrom: " + nchrom),append=T); //number of chromosomes
+		writeFile(filePath=filePath,contents=("#maprec: " + maprec),append=T); //map of recombination: [convex, quadratic, conic, flat] (centromere to telomeres)
+		
+		writeFile(filePath=filePath,contents=("#mutation_rate: " + mutation_rate),append=T); //mutation rate
+		writeFile(filePath=filePath,contents=("#max_recrate: " + max_recrate),append=T); 
+		writeFile(filePath=filePath,contents=("#min_recrate: " + min_recrate),append=T);
+		
+		//initial distributions of fitness
+		writeFile(filePath=filePath,contents=("#prop_beneficial_p1: " + prop_beneficial_p1),append=T);
+		writeFile(filePath=filePath,contents=("#prop_beneficial_p2: " + prop_beneficial_p2),append=T);
+		writeFile(filePath=filePath,contents=("s_mean_beneficial_p1: " + s_mean_beneficial_p1), append=T); 
+		writeFile(filePath=filePath,contents=("s_mean_beneficial_p2: " + s_mean_beneficial_p2), append=T); 
+		writeFile(filePath=filePath,contents=("s_mean_deleterious: " + s_mean_deleterious),append=T); 
+		writeFile(filePath=filePath,contents=("shape_deleterious: " + shape_deleterious),append=T);
+		writeFile(filePath=filePath,contents=("shape_beneficial: " + shape_beneficial),append=T);
+		writeFile(filePath=filePath,contents=("#h_mean: " + h_mean),append=T); //Dominance: fom Wang, Caballero, Keigthley and Hill
+
+		
+		//times to change environment and time to present
+		writeFile(filePath=filePath,contents=("#t0: " + t0),append=T);
+		writeFile(filePath=filePath,contents=("#tend: " + tend),append=T);
+		
+		//Phenotypic and environmental parameters
+		writeFile(filePath=filePath,contents=("#tau: " + tau),append=T); //a correlation phenotype-fitness (for EWfunction
+		writeFile(filePath=filePath,contents=("#sigma: " + sigma),append=T); //variance in phenotype
+		writeFile(filePath=filePath,contents=("#disp: " + disp),append=T); //shape of gamma distribution (for bivariant gamma)
+	}
+	
+	//print fitness the phenotypic effects for all the positions
+	writeFile(filePath=filePath,contents=("\n"),append=T);
+	
+	muts = sortBy(sim.mutations,"position");
+	//calculate a vector of frequencies (dependent of population)
+	if(pop=="p1") frqp=(sim.mutationCounts(p1)/(2.0*Ne_pop));
+	if(pop=="p2") frqp=(sim.mutationCounts(p2)/(2.0*Ne_pop));
+	
+	mut_array=NULL;
+	if(size(muts)) {
+		j = 0;
+		while(j<size(muts)) {
+			mut_array = rbind(mut_array,c( asFloat(muts[j].position),asFloat(muts[j].getValue("SelCoeffp1")),asFloat(muts[j].getValue("SelCoeffp2")),asFloat(muts[j].getValue("dom")),asFloat(muts[j].getValue("PhenEffect")),asFloat(asInteger(muts[j].mutationType==m2)+1),asFloat(frqp[j])));
+			j = j + 1;
+		}
+	}
+	//now sort and remove repeated row values (by position)
+	writeFile(filePath=filePath,contents=("POS\tSCOEF1\tSCOEF2\tDOM\tEFFSIZE\tTYPE\tFREQ"),append=T);
+	//mut_array = cbind(mut_pos,mut_SC1,mut_SC2,mut_dom,mut_efs,mut_typ,mut_frq);
+	mut_array = mut_array[order(mut_array[,0]),];
+	un_mut_array = unique(mut_array[,0]);
+	new_mut_array = NULL;
+	if(size(un_mut_array)) {
+		for(i in 0:(size(un_mut_array)-1)) {
+			new_mut_array = rbind(new_mut_array,mut_array[(which(mut_array[,0]==un_mut_array[i])[0]),]); 
+		}
+		//print results
+		for(j in 0:(size(un_mut_array)-1)) {
+			writeFile(filePath=filePath,contents=(asInteger(new_mut_array[j,0]) + "\t" + new_mut_array[j,1] + "\t" + new_mut_array[j,2] + "\t" + new_mut_array[j,3] + "\t" + new_mut_array[j,4] + "\t" + new_mut_array[j,5] + "\t"  + new_mut_array[j,6] + "\t" ),append=T);
+		}
+	}	
+	return;
+}
+
+//THE VALUES OF FITNESS AND TRAITS for functional mutations
+//neutral mutations
+mutation(m1) {
+	mut.setValue("SelCoeffp1", 0);
+	mut.setValue("SelCoeffp2", 0);
+	mut.setValue("PhenEffect", 0);
+	mut.setValue("dom",0.5);
+	return T;
+}
+//functional mutations
+mutation(m2,p1) {
+	m = asInteger(sample(c(0:(total_m2muts_p1-1)),1));
+	//print("sel_values: " + sel_values);
+	SelCoeffp1 = sel_values[m];
+	SelCoeffp2 = sel_values2[m];
+	PhenEffect = phe_values[m];
+	domp = dom_values[m];
+	
+	mut.setValue("SelCoeffp1", SelCoeffp1);
+	mut.setValue("SelCoeffp2", SelCoeffp2);
+	mut.setValue("PhenEffect", PhenEffect);
+	mut.setValue("dom",domp);
+	/*print("\nm2:\nSelCoefp1: " + mut.setValue("SelCoeffp1") + 
+	      "\nPhenEffectp1: " + mut.getValue("PhenEffectp1") +
+	      "\ndom: " + mut.getValue("dom") +
+	      "\nPosition: " + mut.position); *////debugging
+	return T;
+}
+mutation(m2,p2) {
+	m = asInteger(sample(c(0:(total_m2muts_p2-1)),1)); //total_m2muts_p1
+	SelCoeffp1 = 0;
+	SelCoeffp2 = sel_values_p2[m];//sel_values[m];
+	PhenEffect = phe_values_p2[m];//;phe_values[m];
+	domp = dom_values_p2[m];//dom_values[m];
+	
+	mut.setValue("SelCoeffp1", SelCoeffp1);
+	mut.setValue("SelCoeffp2", SelCoeffp2);
+	mut.setValue("PhenEffect", PhenEffect);
+	mut.setValue("dom",domp);
+	/*print("\nm2:\nSelCoefp1: " + mut.setValue("SelCoeffp1") + 
+	      "\nPhenEffectp1: " + mut.getValue("PhenEffectp1") +
+	      "\ndom: " + mut.getValue("dom") +
+	      "\nPosition: " + mut.position); *////debugging
+	return T;
+}
+
+//we consider the fitness is multiplicative
+mutationEffect(m2,p1) {
+	hh = homozygous? 1.0 else mut.getValue("dom");
+	//print("\nhh: " + hh + " SelCoeffp1: " +  mut.getValue("SelCoeffp1"));
+	return 1.0 + hh * mut.getValue("SelCoeffp1"); // 1 + hs
+}
+mutationEffect(m2,p2) {
+	hh = homozygous? 1.0 else mut.getValue("dom");
+	//print("\nhh: " + hh + " SelCoeffp2: " +  mut.getValue("SelCoeffp2"));
+	return 1.0 + hh * mut.getValue("SelCoeffp2"); // 1 + hs
+}
+
+// 1. RUN SIM
+1 early() {
+	//create population and evol
+	sim.addSubpop("p1",Ne_pop); //create the ancestral 
+	community.rescheduleScriptBlock(s1, start=t0, end=t0); //print data (WILD) 
+	community.rescheduleScriptBlock(s2, start=t0+1, end=t0+1); //environmental change,step1 
+	community.rescheduleScriptBlock(s3, start=t0+1, end=t0+1); //environmental change, step2 
+	community.rescheduleScriptBlock(s4, start=t0+tend, end=t0+tend); //end, print data (DOM)
+}
+// keep the sequences and the fitness and phenotypic effect per position for subpop p1. Be careful with REPEATED POSITIONS (filter later)!!!
+s1 1500000 late() {
+	print("Step s1 (generating first pop) finished.");
+	file_output1end = filePathData + file_output1 + ".p1.txt";
+	p1.outputMSSample(sampleSize=2*Ne_pop,replace=F,filePath=file_output1end,append=F);
+	filePath1=filePathData + file_output1 + ".p1" + "_table.txt";
+	output_fit_plus_phen(filePath=filePath1,append=F, printpar=T,pop="p1");
+	//genomes.outputFixedMutations(filePath=filePathData + ".p1" + "_fixed.txt"); //wrong used, instead, m2.convertToSubstitution = F;
+}
+// Pass (two steps) all individuals subpop p1 -> p2  after t0 generations (Environmental change)
+s2	1500001 early() {
+	sim.addSubpop("p2", Ne_pop);
+	p2.setMigrationRates(p1,1.0);
+	print("Step s2 (transferring p1 to p2) finished.");
+}
+s3 1500001 late() {
+	p2.setMigrationRates(p1,0.0);
+	p1.setSubpopulationSize(0);
+	
+	//force a strong selective sweep in n different positions. Can be successful or not
+	if(nsweeps) {
+	   filePath2=filePathData + file_output1 + ".p2" + "_sweeps.txt";
+		muts = sim.mutations;
+      muts = muts[muts.mutationType==m2]; //look only at nonsyn mutations
+      mutsf= sim.mutationFrequencies(p2, muts); 
+ 		muts = muts[mutsf >= 0.05 & mutsf <= 0.15];	//Warning: take mutations with freqs between 0.05 and 0.15 !
+		if (size(muts)>=nsweeps)
+		{
+				mut = sample(muts, nsweeps);
+				mut.setValue("PhenEffect",disp);
+				mut.setValue("SelCoeffp1",0);
+				mut.setValue("SelCoeffp2",s_beneficial_sweep);
+  				print("Sweep at position: ");
+   			print(mut.position);
+   			writeFile(filePath=filePath2,contents=("#Sweep at position: " + mut.position),append=F);
+		}
+		else {
+			cat("No contender of sufficient frequency found.\n");
+		}
+	}
+	
+	print("Step s3 (creating selective sweeps at p2) finished.");
+}
+// keep the sequences and the fitness and phenotypic effect per position for subpop p2. Be careful with REPEATED POSITIONS (filter later)!!!
+s4 1550000 late () {
+	print("Step s4 (p2 is sampled after tend generations) finished.");
+	file_output2end = filePathData + file_output1 + ".p2.txt";
+	p2.outputMSSample(sampleSize=2*Ne_pop,replace=F,filePath=file_output2end,append=F);
+	filePath2=filePathData + file_output1 + ".p2" + "_table.txt";
+	output_fit_plus_phen(filePath=filePath2,append=F,printpar=T,pop="p2");	
+	//genomes.outputFixedMutations(filePath=filePathData + ".p2" + "_fixed.txt"); //wrong use instead, m2.convertToSubstitution = F;
+	print("Simulation finished.");
+	sim.simulationFinished();
+}
+
+
+
+
+
